@@ -375,7 +375,7 @@ const updateParams = res => {
     updateParams(convRes);
     conversations.length > 0 && await asyncPool(10, conversations, async (conv) => await deleteChat(conv.uuid)); //await Promise.all(conversations.map((conv => deleteChat(conv.uuid))));
 /***************************** */
-    invalidtime = 0;
+    invalidtime = 0, changing = false;
     } catch (err) {
         console.error('[33mClewd:[0m\n%o', err);
         Config.CookieArray?.length > 0 && CookieChanger.emit('ChangeCookie');
