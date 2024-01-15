@@ -6,5 +6,7 @@ then
 fi
 
 npm install --no-audit --fund false
-chmod u+x node_modules/clewd-superfetch/bin/*
+chown -R $(whoami) lib/bin/*
+chmod u+x lib/bin/*
+chmod -R 777 $(pwd)
 node clewd.js
