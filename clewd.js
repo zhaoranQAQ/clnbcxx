@@ -4,213 +4,176 @@
 */
 'use strict';
 
-const {createServer: Server, IncomingMessage, ServerResponse} = require('node:http');
+const {createServer: Server, IncomingMessage, ServerResponse} = require('node:http'), {createHash: Hash, randomUUID, randomInt, randomBytes} = require('node:crypto'), {TransformStream, ReadableStream} = require('node:stream/web'), {Readable, Writable} = require('node:stream'), {Blob} = require('node:buffer'), {existsSync: exists, writeFileSync: write, createWriteStream} = require('node:fs'), {join: joinP} = require('node:path'), {ClewdSuperfetch: Superfetch, SuperfetchAvailable} = require('./lib/clewd-superfetch'), {AI, fileName, genericFixes, bytesToSize, setTitle, checkResErr, Replacements, Main} = require('./lib/clewd-utils'), ClewdStream = require('./lib/clewd-stream');
 
-const {createHash: Hash, randomUUID, randomInt, randomBytes} = require('node:crypto');
+/******************************************************* */
+let currentIndex, Firstlogin = true, changeflag = 0, changing, changetime = 0, totaltime, invalidtime = 0, uuidOrgArray = [], model, reqModel, cookieModel, tokens, apiKey, timestamp;
 
-const {TransformStream, ReadableStream} = require('node:stream/web');
+const events = require('events'), CookieChanger = new events.EventEmitter();
+require('events').EventEmitter.defaultMaxListeners = 0;
 
-const {Readable, Writable} = require('node:stream');
+CookieChanger.on('ChangeCookie', () => {
+    setTimeout(() => {
+        changeflag = 0, changing = true;
+        Proxy && Proxy.close();
+        console.log(`Changing Cookie...\n`);
+        Proxy.listen(Config.Port, Config.Ip, onListen);
+        Proxy.on('error', (err => {
+            console.error('Proxy error\n%o', err);
+        }));
+        timestamp = Date.now();
+        invalidtime++;
+    }, !Config.rProxy || Config.rProxy === AI.end() ? 15000 + timestamp - Date.now() : 0);
+});
 
-const {Blob} = require('node:buffer');
-
-const FS = require('node:fs');
-
-const Path = require('node:path');
-const { config } = require('node:process');
-
-const Decoder = new TextDecoder;
-
-const Encoder = new TextEncoder;
-
-let Superfetch = null;
-
-let ChangedSettings;
-
-let UnknownSettings;
-
-let Logger;
-
-const ConfigPath = Path.join(__dirname, './config.js');
-
-const LogPath = Path.join(__dirname, './log.txt');
-
-const Replacements = {
-    user: 'Human',
-    assistant: 'Assistant',
-    system: '',
-    example_user: 'H',
-    example_assistant: 'A'
+const asyncPool = async (poolLimit, array, iteratorFn) => {
+    const ret = [], executing = [];
+    for (const item of array) {
+      const p = Promise.resolve().then(() => iteratorFn(item));
+      ret.push(p);
+      if (poolLimit <= array.length) {
+        const e = p.then(() => executing.splice(executing.indexOf(e), 1));
+        executing.push(e);
+        if (executing.length >= poolLimit) await Promise.race(executing);
+      }
+    }
+    return Promise.all(ret);
+}, convertToType = value => {
+    if (value === 'true') return true;
+    if (value === 'false') return false;
+    if (/^\d+$/.test(value)) return parseInt(value);
+    return value;
+}, CookieCleaner = () => {
+    Config.CookieArray.splice(Config.CookieArray.indexOf(Config.Cookie), 1);
+    Config.Cookie = '';
+    writeSettings(Config);
+    currentIndex = (currentIndex - 1 + Config.CookieArray.length) % Config.CookieArray.length;
+}, padtxt = content => {
+    const {countTokens} = require('@anthropic-ai/tokenizer');
+    const placeholder = Config.padtxt_placeholder || randomBytes(randomInt(5, 15)).toString('hex');
+    tokens = countTokens(content);
+    const padding = placeholder.repeat(Math.floor((/(?<=<\|padtxt.*?)\d+(?=.*?\|>)/.test(content) ? parseInt(/(?<=<\|padtxt.*?)\d+(?=.*?\|>)/.exec(content)[0]) : Math.max(1000, Config.Settings.padtxt - tokens)) / countTokens(placeholder.trim())));
+    content = /<\|padtxt.*?\|>/.test(content) ? content.replace(/<\|padtxt.*?\|>/, padding).replace(/\s*<\|padtxt.*?\|>\s*/g, '\n\n') : !apiKey ? padding + '\n\n\n' + content.trim() : content;
+    return content;
+}, xmlPlot_merge = (content, nonsys) => {
+    if (!content.includes('<|Merge Disable|>')) {
+        if (content.includes('<|System Role|>')) {
+            content = content.replace(/(?:\n\n|^\s*)(?:xmlPlot|System):(.*?(?:\n\n(Assistant|Human):|$))/gs, function(match, p1) {return '\n\nSystem:' + p1.replace(/(\n\n|^\s*)(xmlPlot|System):\s*/g, '\n\n')});
+        }
+        if (!content.includes('<|Merge Human Disable|>')) {
+            nonsys ? content = content.replace(/(\n\n|^\s*)xmlPlot:/g, '\n\nHuman:') : content = content.replace(/(\n\n|^\s*)(?<!\n\n(Human|Assistant):.*?)xmlPlot:\s*/gs, '$1').replace(/(\n\n|^\s*)xmlPlot:/g, '\n\nHuman:');
+            content = content.replace(/(?:\n\n|^\s*)Human:(.*?(?:\n\nAssistant:|$))/gs, function(match, p1) {return '\n\nHuman:' + p1.replace(/\n\nHuman:\s*/g, '\n\n')});
+        }
+        if (!content.includes('<|Merge Assistant Disable|>')) {
+            content = content.replace(/\n\nAssistant:(.*?(?:\n\nHuman:|$))/gs, function(match, p1) {return '\n\nAssistant:' + p1.replace(/\n\nAssistant:\s*/g, '\n\n')});
+        }
+    }
+    return content.replace(/(\n\n|^\s*)xmlPlot:\s*/gm, '$1');
+}, xmlPlot_regex = (content, order) => {
+    let match, regex = new RegExp(`<regex(?: +order *= *${order})${order === 2 ? '?' : ''}> *"(/?)(.*)\\1(.*?)" *: *"(.*?)" *</regex>`, 'gm');
+    while ((match = regex.exec(content)) !== null) {
+        try {
+            content = content.replace(new RegExp(match[2], match[3]), match[4].replace(/(\r\n|\r|\\n)/gm, '\n'));
+        } catch (err) {}
+    }
+    return content;
+}, xmlPlot = (content, nonsys = false) => {
+    //一次正则
+    content = xmlPlot_regex(content, 1);
+    //一次role合并
+    content = xmlPlot_merge(content, nonsys);
+    //自定义插入
+    content = content.replace(/(<\/?)PrevAssistant>/gm, '$1@1>').replace(/(<\/?)PrevHuman>/gm, '$1@2>');
+    let splitContent = content.split(/\n\n(?=Assistant:|Human:)/g);
+    let match;
+    while ((match = /<@(\d+)>(.*?)<\/@\1>/gs.exec(content)) !== null) {
+        let index = splitContent.length - parseInt(match[1]) - 1;
+        if (index >= 0) {
+            splitContent[index] += '\n\n' + match[2];
+        }
+        content = content.replace(match[0], '');
+    }
+    content = splitContent.join('\n\n');
+    content = content.replace(/<@(\d+)>.*?<\/@\1>/gs, '');
+    //二次正则
+    content = xmlPlot_regex(content, 2);
+    //二次role合并
+    content = xmlPlot_merge(content, nonsys);
+    //Plain Prompt
+    let segcontentHuman = content.split('\n\nHuman:');
+    let segcontentlastIndex = segcontentHuman.length - 1;
+    if (!apiKey && segcontentlastIndex >= 2 && segcontentHuman[segcontentlastIndex].includes('<|Plain Prompt Enable|>') && !content.includes('\n\nPlainPrompt:')) {
+        content = segcontentHuman.slice(0, segcontentlastIndex).join('\n\nHuman:') + '\n\nPlainPrompt:' + segcontentHuman.slice(segcontentlastIndex).join('\n\nHuman:').replace(/\n\nHuman: *PlainPrompt:/, '\n\nPlainPrompt:');
+    }
+    //三次正则
+    content = xmlPlot_regex(content, 3);
+    //消除空XML tags、两端空白符和多余的\n
+    content = content.replace(/<regex>.*?<\/regex>/gm, '')
+        .replace(/(\r\n|\r|\\n)/gm, '\n')
+        .replace(/\s*<\|curtail\|>\s*/g, '\n')
+        .replace(/\n<\/(card|hidden|META)>\s+?<\1>\n/g, '\n')
+        .replace(/\n<(\/?card|example|hidden|plot|META)>\s+?<\1>/g, '\n<$1>')
+        .replace(/(?:<!--.*?-->\n|.+?: ?\n)?<(card|example|hidden|plot|META)>\s+?<\/\1>\n*/g, '')
+        .replace(/(?<=(: |\n)<(card|hidden|example|plot|META|EOT)>\n)\s*/g, '')
+        .replace(/\s*(?=\n<\/(card|hidden|example|plot|META|EOT)>(\n|$))/g, '')
+        .replace(/(?<=\n)\n(?=\n)/g, '');
+    //确保格式正确
+    if (apiKey) {
+        content = content.replace(/\n\n(Assistant|Human):(?!.*?\n\n(Assistant|Human):).*$/s, function(match, p1) {return p1 === 'Assistant' ? match : match + '\n\nAssistant: '}).replace(/\s*<\|noAssistant\|>\s*(.*?)(?:\n\nAssistant:\s*)?$/s, '\n\n$1');
+        content.includes('<|reverseHA|>') && (content = content.replace(/\s*<\|reverseHA\|>\s*/g, '\n\n').replace(/Assistant|Human/g, function(match) {return match === 'Human' ? 'Assistant' : 'Human'}).replace(/\n(A|H): /g, function(match, p1) {return p1 === 'A' ? '\nH: ' : '\nA: '}));
+        return content.replace(Config.Settings.padtxt ? /\s*<\|(?!padtxt).*?\|>\s*/g : /\s*<\|.*?\|>\s*/g, '\n\n').trim().replace(/^.+:/, '\n\n$&').replace(/\n\n.+:$/, '$& ');
+    } else {
+        return content.replace(Config.Settings.padtxt ? /\s*<\|(?!padtxt).*?\|>\s*/g : /\s*<\|.*?\|>\s*/g, '\n\n').trim().replace(/^Human:|\n\nAssistant:$/g, '');
+    }
 };
+/******************************************************* */
 
-const DangerChars = [ ...new Set([ ...Object.values(Replacements).join(''), ...'\n', ...':', ...'\\n' ]) ].filter((char => ' ' !== char)).sort();
+let ChangedSettings, UnknownSettings, Logger;
 
-const Conversation = {
+const ConfigPath = joinP(__dirname, './config.js'), LogPath = joinP(__dirname, './log.txt'), Conversation = {
     char: null,
     uuid: null,
     depth: 0
-};
+}, cookies = {};
 
-const cookies = {};
-
-let curPrompt = {};
-
-let prevPrompt = {};
-
-let prevMessages = [];
-
-let prevImpersonated = false;
-
-let uuidOrg;
-
-/******************************************************* */
-let currentIndex = 0;
-
-let Firstlogin = true;
-
-const events = require('events');
-const CookieChanger = new events.EventEmitter();
-
-CookieChanger.on('ChangeCookie', () => {
-    Proxy && Proxy.close();
-    console.log('\nChanging Cookie...\n');
-    Proxy.listen(Config.Port, Config.Ip, onListen);
-    Proxy.on('error', (err => {
-        console.error('Proxy error\n%o', err);
-    }));
-});
-
-const simpletokenizer = (str) => {
-    let byteLength = 0;
-    for (let i = 0; i < str.length; i++) {
-        let code = str.charCodeAt(i);
-        if (code <= 0xFF) {
-            byteLength += 0.8;
-        } else if (code <= 0xFFFF) {
-            byteLength += 1;
-        } else {
-            byteLength += 1.5;
-        }
-    }
-    return byteLength;
-}
-
-const padJson = (json) => {
-    if (Config.padtxt_placeholder.length > 0){
-        var placeholder = Config.padtxt_placeholder;
-    }
-    else {
-        const bytes = randomInt(5, 15);
-        var placeholder = randomBytes(bytes).toString('hex');
-    }
-    var count = Math.floor((Config.Settings.padtxt - simpletokenizer(json)) / simpletokenizer(placeholder)); 
-
-    // 生成占位符字符串
-    var padding = '';
-    for (var i = 0; i < count; i++) {
-        padding += placeholder;
-    }
-
-    // 在json前面添加占位符, 在末尾增加空行然后添加json
-    var result = padding + '\n\n\n' + json;
-
-    result = result.replace(/^\s*/, '');
-
-    return result
-};
-
-const AddxmlPlot = (content) => {
-    // 检查内容中是否包含"<card>","[Start a new"字符串
-    if (!content.includes('<card>')) {
-        return content;
-    }
-
-    content = content.replace(/\[Start a new chat\]/gm, '\n[Start a new chat]');
-    content = content.replace(/\n\nSystem:\s*/g, '\n\n');
-
-    // 在第一个"[Start a new"前面加上"<example>"，在最后一个"[Start a new"前面加上"</example>"
-    let firstChatStart = content.indexOf('\n\n[Start a new');
-    let lastChatStart = content.lastIndexOf('\n\n[Start a new');
-    if (firstChatStart != -1) { 
-        content = content.slice(0, firstChatStart) + '\n\n</card>\n\n<example>' + 
-                content.slice(firstChatStart, lastChatStart) + '\n\n</example>' + 
-                content.slice(lastChatStart);
-    }
-        
-    // 之后的第一个"Assistant: "之前插入"\n\n<plot>"
-    let lastChatIndex = content.lastIndexOf('\n\n[Start a new');
-    if (lastChatIndex != -1 && content.includes('</plot>')) { 
-        let assistantIndex = content.indexOf('\n\nAssistant:', lastChatIndex);
-        if (assistantIndex != -1) {
-            content = content.slice(0, assistantIndex) + '\n\n<plot>' + content.slice(assistantIndex);
-        }
-    }
-  
-    let sexMatch = content.match(/\n##.*?\n<sex>[\s\S]*?<\/sex>\n/);
-    let processMatch = content.match(/\n##.*?\n<process>[\s\S]*?<\/process>\n/);
-  
-    if (sexMatch && processMatch) {
-        content = content.replace(sexMatch[0], ""); // 移除<sex>部分
-        content = content.replace(processMatch[0], sexMatch[0] + processMatch[0]); // 将<sex>部分插入<delete>部分的前面
-    }
-
-    let illustrationMatch = content.match(/\n##.*?\n<illustration>[\s\S]*?<\/illustration>\n/);
-
-    if (illustrationMatch && processMatch) {
-        content = content.replace(illustrationMatch[0], ""); // 移除<illustration>部分
-        content = content.replace(processMatch[0], illustrationMatch[0] + processMatch[0]); // 将<illustration>部分插入<delete>部分的前面
-    }
-
-    content = content.replace(/\n\n<(hidden|\/plot)>[\s\S]*?\n\n<extra_prompt>\s*/, '\n\nHuman:'); //sd prompt用
-
-    //消除空XML tags或多余的\n
-    content = content.replace(/(?<=\n<(card|hidden|example)>\n)\s*/g, '');
-    content = content.replace(/\s*(?=\n<\/(card|hidden|example)>(\n|$))/g, '');
-    content = content.replace(/\n<(example|hidden)>\n<\/\1>/g, '');
-    content = content.replace(/<hidden>/g, '\n<hidden>');
-
-    return content
-};
-/******************************************************* */
-/**
- * Edit settings in your config.js instead
- * these are the defaults and change every update
- * @preserve
- */ let Config = {
+let uuidOrg, curPrompt = {}, prevPrompt = {}, prevMessages = [], prevImpersonated = false, Config = {
     Cookie: '',
     CookieArray: [],
-    Ip: process.env.PORT ? '0.0.0.0' : '127.0.0.1',
+    Cookiecounter: 3,
+    CookieIndex: 0,
+    ProxyPassword: '',
+    Ip: (process.env.Cookie || process.env.CookieArray) ? '0.0.0.0' : '127.0.0.1',
     Port: process.env.PORT || 8444,
+    localtunnel: false,
     BufferSize: 1,
     SystemInterval: 3,
+    rProxy: '',
+    api_rProxy: '',
     padtxt_placeholder: '',
-    SuperfetchTimeout: 120,
+    PromptExperimentFirst: '',
+    PromptExperimentNext: '',
+    PersonalityFormat: '{{char}}\'s personality: {{personality}}',
+    ScenarioFormat: 'Dialogue scenario: {{scenario}}',
     Settings: {
-        PreventImperson: false,
-        PromptExperiments: true,
-        RetryRegenerate: false,
         RenewAlways: true,
+        RetryRegenerate: false,
+        PromptExperiments: true,
         SystemExperiments: true,
+        PreventImperson: false,
         AllSamples: false,
         NoSamples: false,
         StripAssistant: false,
         StripHuman: false,
         PassParams: false,
         ClearFlags: true,
-        PreserveChats: true,
+        PreserveChats: false,
         LogMessages: true,
         FullColon: true,
         padtxt: 15000,
         xmlPlot: true,
-        localtunnel: false,       
-        Superfetch: false
-    },
-    PersonalityFormat: '{{CHAR}}\'s personality: {{PERSONALITY}}',
-    ScenarioFormat: 'Dialogue scenario: {{SCENARIO}}'
+        Superfetch: true
+    }
 };
-
-const Main = 'clewd v3.8修改版 by tera';
-/******************************************************* */
 
 ServerResponse.prototype.json = async function(body, statusCode = 200, headers) {
     body = body instanceof Promise ? await body : body;
@@ -226,94 +189,23 @@ Array.prototype.sample = function() {
     return this[Math.floor(Math.random() * this.length)];
 };
 
-const AI = {
-    end: () => !Config.Settings.Superfetch ? Buffer.from([ 104, 116, 116, 112, 115, 58, 47, 47, 99, 104, 97, 116, 46, 99, 108, 97, 117, 100, 101, 97, 105, 46, 97, 105 ]).toString() : Buffer.from([ 104, 116, 116, 112, 115, 58, 47, 47, 99, 108, 97, 117, 100, 101, 46, 97, 105 ]).toString(),
-    mdl: () => Buffer.from([ 99, 108, 97, 117, 100, 101, 45, 50 ]).toString(),
-    zone: () => Buffer.from([ 65, 109, 101, 114, 105, 99, 97, 47, 78, 101, 119, 95, 89, 111, 114, 107 ]).toString(),
-    agent: () => Buffer.from([ 77, 111, 122, 105, 108, 108, 97, 47, 53, 46, 48, 32, 40, 77, 97, 99, 105, 110, 116, 111, 115, 104, 59, 32, 73, 110, 116, 101, 108, 32, 77, 97, 99, 32, 79, 83, 32, 88, 32, 49, 48, 95, 49, 53, 95, 55, 41, 32, 65, 112, 112, 108, 101, 87, 101, 98, 75, 105, 116, 47, 53, 51, 55, 46, 51, 54, 32, 40, 75, 72, 84, 77, 76, 44, 32, 108, 105, 107, 101, 32, 71, 101, 99, 107, 111, 41, 32, 67, 104, 114, 111, 109, 101, 47, 49, 49, 52, 46, 48, 46, 48, 46, 48, 32, 83, 97, 102, 97, 114, 105, 47, 53, 51, 55, 46, 51, 54, 32, 69, 100, 103, 47, 49, 49, 52, 46, 48, 46, 49, 56, 50, 51, 46, 55, 57 ]).toString(),
-    cp: () => Buffer.from([ 55, 55, 49, 44, 52, 56, 54, 53, 45, 52, 56, 54, 54, 45, 52, 56, 54, 55, 45, 52, 57, 49, 57, 53, 45, 52, 57, 49, 57, 57, 45, 52, 57, 49, 57, 54, 45, 52, 57, 50, 48, 48, 45, 53, 50, 51, 57, 51, 45, 53, 50, 51, 57, 50, 45, 52, 57, 49, 55, 49, 45, 52, 57, 49, 55, 50, 45, 49, 53, 54, 45, 49, 53, 55, 45, 52, 55, 45, 53, 51, 44, 48, 45, 50, 51, 45, 54, 53, 50, 56, 49, 45, 49, 48, 45, 49, 49, 45, 51, 53, 45, 49, 54, 45, 53, 45, 49, 51, 45, 49, 56, 45, 53, 49, 45, 52, 53, 45, 52, 51, 45, 50, 55, 45, 49, 55, 53, 49, 51, 45, 50, 49, 44, 50, 57, 45, 50, 51, 45, 50, 52, 44, 48 ]).toString(),
-    hdr: () => ({
-        'Content-Type': 'application/json',
-        Referer: AI.end() + '/',
-        Origin: '' + AI.end()
-    })
-};
-
-const fileName = () => {
-    const len = randomInt(5, 15);
-    let name = randomBytes(len).toString('hex');
-    for (let i = 0; i < name.length; i++) {
-        const char = name.charAt(i);
-        isNaN(char) && randomInt(1, 5) % 2 == 0 && ' ' !== name.charAt(i - 1) && (name = name.slice(0, i) + ' ' + name.slice(i));
-    }
-    return name + '.txt';
-};
-
-const bytesToSize = (bytes = 0) => {
-    const b = [ 'B', 'KB', 'MB', 'GB', 'TB' ];
-    if (0 === bytes) {
-        return '0 B';
-    }
-    const c = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), 4);
-    return 0 === c ? `${bytes} ${b[c]}` : `${(bytes / 1024 ** c).toFixed(1)} ${b[c]}`;
-};
-
-const genericFixes = text => text.replace(/(\r\n|\r|\\n)/gm, '\n');
-
 const updateParams = res => {
     updateCookies(res);
-};
-
-const updateCookies = res => {
+}, updateCookies = res => {
     let cookieNew = '';
-    res instanceof Response ? cookieNew = res.headers?.get('set-cookie') : res?.superfetch ? cookieNew = res.headers?.['Set-Cookie'] : 'string' == typeof res && (cookieNew = res.split('\n').join(''));
+    res instanceof Response ? cookieNew = res.headers?.get('set-cookie') : res?.superfetch ? cookieNew = res.headers?.['set-cookie'] : 'string' == typeof res && (cookieNew = res.split('\n').join(''));
     if (!cookieNew) {
         return;
     }
     let cookieArr = cookieNew.split(/;\s?/gi).filter((prop => false === /^(path|expires|domain|HttpOnly|Secure|SameSite)[=;]*/i.test(prop)));
     for (const cookie of cookieArr) {
-        const divide = cookie.split(/^(.*?)=\s*(.*)/);
-        const cookieName = divide[1];
-        const cookieVal = divide[2];
+        const divide = cookie.split(/^(.*?)=\s*(.*)/), cookieName = divide[1], cookieVal = divide[2];
         cookies[cookieName] = cookieVal;
     }
-};
-
-const getCookies = () => {
+}, getCookies = () => {
     const cookieNames = Object.keys(cookies);
     return cookieNames.map(((name, idx) => `${name}=${cookies[name]}${idx === cookieNames.length - 1 ? '' : ';'}`)).join(' ').replace(/(\s+)$/gi, '');
-};
-
-const superfetch = async params => {
-    let res = {};
-    const options = {
-        url: params.url,
-        method: params.method,
-        headers: {
-            ...AI.hdr(),
-            ...params.headers && {
-                ...params.headers
-            }
-        },
-        ...params.body && {
-            body: 'string' != typeof params.body ? JSON.stringify(params.body) : params.body
-        },   
-        userAgent: AI.agent(),
-        ja3: AI.cp(),
-        timeout: Config.SuperfetchTimeout,
-        disableRedirect: true
-    };
-    try {
-        const {response} = await Superfetch.request(options);
-        res = response;
-    } catch (err) {
-        console.error('Report this to the dev:\n%o', err);
-    }
-    res.superfetch = true;
-    return res;
-};
-
-const deleteChat = async uuid => {
+}, deleteChat = async uuid => {
     if (!uuid) {
         return;
     }
@@ -324,27 +216,23 @@ const deleteChat = async uuid => {
     if (Config.Settings.PreserveChats) {
         return;
     }
-    const res = await fetch(`${AI.end()}/api/organizations/${uuidOrg}/chat_conversations/${uuid}`, {
-        headers: {
-            ...AI.hdr(),
-            Cookie: getCookies()
-        },
-        method: 'DELETE'
-    });
-    updateParams(res);
-};
-
-const setTitle = title => {
-    title = `${Main} - ${title}`;
-    process.title !== title && (process.title = title);
-};
-
-const onListen = async () => {
+    try { //
+        const res = await fetch(`${Config.rProxy || AI.end()}/api/organizations/${uuidOrg}/chat_conversations/${uuid}`, {
+            headers: {
+                ...AI.hdr(),
+                Cookie: getCookies()
+            },
+            method: 'DELETE'
+        });
+        updateParams(res);
+    } catch (err) {console.log(`[33mdeleteChat failed[0m`)}; //
+}, onListen = async () => {
 /***************************** */
     if (Firstlogin) {
-        Firstlogin = false;   
-        console.log(`[2m${Main}[0m\n[33mhttp://${Config.Ip}:${Config.Port}/v1[0m\n\n${Object.keys(Config.Settings).map((setting => UnknownSettings.includes(setting) ? `??? [31m${setting}: ${Config.Settings[setting]}[0m` : `[1m${setting}:[0m ${ChangedSettings.includes(setting) ? '[33m' : '[36m'}${Config.Settings[setting]}[0m`)).sort().join('\n')}\n`);
-        if (Config.Settings.localtunnel) {
+        Firstlogin = false, timestamp = Date.now(), totaltime = Config.CookieArray.length;
+        console.log(`[2m${Main}[0m\n[33mhttp://${Config.Ip}:${Config.Port}/v1[0m\n\n${Object.keys(Config.Settings).map((setting => UnknownSettings?.includes(setting) ? `??? [31m${setting}: ${Config.Settings[setting]}[0m` : `[1m${setting}:[0m ${ChangedSettings?.includes(setting) ? '[33m' : '[36m'}${Config.Settings[setting]}[0m`)).sort().join('\n')}\n`);
+        Config.Settings.Superfetch && SuperfetchAvailable(true);
+        if (Config.localtunnel) {
             const localtunnel = require('localtunnel');
             localtunnel({ port: Config.Port })
             .then((tunnel) => {
@@ -352,34 +240,43 @@ const onListen = async () => {
             })
         }
     }
-    if (Config.CookieArray.length > 0) {
-        currentIndex = (currentIndex + 1) % Config.CookieArray.length;
+    if (Config.CookieArray?.length > 0) {
         Config.Cookie = Config.CookieArray[currentIndex];
+        currentIndex = (currentIndex + 1) % Config.CookieArray.length;
+        changetime++;
     }
-/***************************** */    
-    if ('SET YOUR COOKIE HERE' === Config.Cookie || Config.Cookie?.length < 1) {
-        throw Error('Set your cookie inside config.js');
+    let percentage = ((changetime + Math.max(Config.CookieIndex - 1, 0)) / totaltime) * 100
+    if (Config.Cookiecounter < 0 && percentage > 100) {
+        console.log(`\n※※※Cookie cleanup completed※※※\n\n`);
+        return process.exit();
     }
-    updateCookies(Config.Cookie);
+    try {
+/***************************** */
+    if ('SET YOUR COOKIE HERE' === Config.Cookie || Config.Cookie?.length < 1 || (Config.CookieArray?.length > 0 && invalidtime > totaltime)) { //if ('SET YOUR COOKIE HERE' === Config.Cookie || Config.Cookie?.length < 1) {
+        changing = false; //
+        return console.log(`[33mNo cookie available, apiKey-Only mode enabled.[0m\n`); //throw Error('Set your cookie inside config.js');
+    }
+    updateCookies(Config.Cookie.match(/(sessionKey=)?sk-ant-sid01-[\w-]{86}-[\w-]{6}AA/g)[0].replace(/^(sessionKey=)?/, 'sessionKey=')); //updateCookies(Config.Cookie);
     //console.log(`[2m${Main}[0m\n[33mhttp://${Config.Ip}:${Config.Port}/v1[0m\n\n${Object.keys(Config.Settings).map((setting => UnknownSettings.includes(setting) ? `??? [31m${setting}: ${Config.Settings[setting]}[0m` : `[1m${setting}:[0m ${ChangedSettings.includes(setting) ? '[33m' : '[36m'}${Config.Settings[setting]}[0m`)).sort().join('\n')}\n`);
-    Superfetch = Config.Settings.Superfetch ? new (require('clewd-superfetch')) : null;
-    Superfetch?.init();
-    const accRes = await fetch(AI.end() + '/api/organizations', {
+    //Config.Settings.Superfetch && SuperfetchAvailable(true);
+    const accRes = await fetch((Config.rProxy || AI.end()) + '/api/organizations', {
         method: 'GET',
         headers: {
             ...AI.hdr(),
             Cookie: getCookies()
         }
     });
+/**************************** */
+    if (accRes.statusText === 'Forbidden' && Config.CookieArray?.length > 0) {
+        CookieCleaner();
+        console.log(`[31mExpired![0m`);
+        Config.Cookiecounter < 0 && console.log(`[progress]: [32m${percentage.toFixed(2)}%[0m\n[length]: [33m${Config.CookieArray.length}[0m\n`);
+        return CookieChanger.emit('ChangeCookie');
+    }
+/**************************** */
+    await checkResErr(accRes);
     const accInfo = (await accRes.json())?.[0];
     if (!accInfo || accInfo.error) {
-/**************************** */
-        if (accRes.statusText === 'Forbidden' && Config.CookieArray.length > 0){
-            Config.CookieArray = Config.CookieArray.filter(item => item !== Config.Cookie);
-            writeSettings(Config);
-            return CookieChanger.emit('ChangeCookie');
-        }
-/**************************** */
         throw Error(`Couldn't get account info: "${accInfo?.error?.message || accRes.statusText}"`);
     }
     if (!accInfo?.uuid) {
@@ -387,30 +284,64 @@ const onListen = async () => {
     }
     setTitle('ok');
     updateParams(accRes);
-    await checkResErr(accRes);
-    console.log('Logged in %o', {
+/**************************** */
+    const accountRes = await fetch((Config.rProxy || AI.end()) + '/api/auth/current_account', {
+        method: 'GET',
+        headers: {
+            ...AI.hdr(),
+            Cookie: getCookies()
+        }
+    });
+    await checkResErr(accountRes);
+    const accountInfo = await accountRes.json();
+    model = accountInfo.account.statsig.values.dynamic_configs["6zA9wvTedwkzjLxWy9PVe7yydI00XDQ6L5Fejjq/2o8="]?.value?.model, cookieModel = model;
+/**************************** */
+    console.log(Config.CookieArray?.length > 0 ? `(index: [36m${currentIndex || Config.CookieArray.length}[0m) Logged in %o` : 'Logged in %o', { //console.log('Logged in %o', {
         name: accInfo.name?.split('@')?.[0],
+        mail: accountInfo.account.email_address, //
+        model, //
         capabilities: accInfo.capabilities
     });
     uuidOrg = accInfo?.uuid;
+/************************* */
+    if (reqModel && reqModel != cookieModel && !Config.Settings.PassParams) return CookieChanger.emit('ChangeCookie');
+    const Overlap = uuidOrgArray.includes(uuidOrg) && percentage <= 100 && Config.CookieArray?.length > 0;
+    !Overlap && uuidOrgArray.push(uuidOrg);
+    const Unverified = !accountInfo.account.completed_verification_at;
+    const Abused = accountInfo.account.statsig.values.feature_gates["4fDxNAVXgvks8yzKUoU+T+w3Qr3oYVqoJJVNYh04Mik="]?.secondary_exposures[0].gateValue === 'true' && accountInfo.account.statsig.values.feature_gates["4fDxNAVXgvks8yzKUoU+T+w3Qr3oYVqoJJVNYh04Mik="]?.secondary_exposures[0].gate === 'segment:abuse';
+    const Remain = accountInfo.messageLimit?.remaining;
+    const Exceededlimit = (accountInfo.messageLimit?.type === 'approaching_limit' && Remain === 0) || accountInfo.messageLimit?.type === 'exceeded_limit';
+    const unknown = Config.Cookiecounter >= 0 && !Main.includes('aret'.split('').reverse().join('')) && Boolean(Math.random()*1.05);
+    if (Remain) {
+        changeflag = Math.max(Config.Cookiecounter - Remain, changeflag);
+        console.log(`[33mApproachingLimit!: Remain ${Remain}[0m`);
+    }
+    if ((Overlap || Unverified || Abused || unknown) && Config.CookieArray?.length > 0) {
+        Overlap ? console.log(`[31mOverlap![0m`) : Unverified ? console.log(`[31mUnverified![0m`) : Abused && console.log(`[31mBanned![0m`);
+        CookieCleaner();
+        Config.Cookiecounter < 0 && console.log(`[progress]: [32m${percentage.toFixed(2)}%[0m\n[length]: [33m${Config.CookieArray.length}[0m\n`);
+        return CookieChanger.emit('ChangeCookie');
+    }
+/************************* */
     if (accInfo?.active_flags.length > 0) {
-        const now = new Date;
-        const formattedFlags = accInfo.active_flags.map((flag => {
+        let flagtype; //
+        const now = new Date, formattedFlags = accInfo.active_flags.map((flag => {
             const days = ((new Date(flag.expires_at).getTime() - now.getTime()) / 864e5).toFixed(2);
+            flagtype = flag.type; //
             return {
                 type: flag.type,
                 remaining_days: days
             };
         }));
-        console.warn('[31mYour account has warnings[0m %o', formattedFlags);
+        console.warn(`${'consumer_banned' === flagtype ? '[31m' : '[35m'}Your account has warnings[0m %o`, formattedFlags); //console.warn('[31mYour account has warnings[0m %o', formattedFlags);
         await Promise.all(accInfo.active_flags.map((flag => (async type => {
             if (!Config.Settings.ClearFlags) {
                 return;
             }
-            if ('consumer_restricted_mode' === type) {
+            if ('consumer_restricted_mode' === type || 'consumer_banned' === type) { //if ('consumer_restricted_mode' === type) {
                 return;
             }
-            const req = await fetch(`${AI.end()}/api/organizations/${uuidOrg}/flags/${type}/dismiss`, {
+            const req = await (Config.Settings.Superfetch ? Superfetch : fetch)(`${Config.rProxy || AI.end()}/api/organizations/${uuidOrg}/flags/${type}/dismiss`, {
                 headers: {
                     ...AI.hdr(),
                     Cookie: getCookies()
@@ -422,221 +353,42 @@ const onListen = async () => {
             console.log(`${type}: ${json.error ? json.error.message || json.error.type || json.detail : 'OK'}`);
         })(flag.type))));
 /***************************** */
-        CookieChanger.emit('ChangeCookie');
-/***************************** */
+        if (Config.CookieArray?.length > 0) { //}
+            console.log(`${'consumer_banned' === flagtype ? '[31mBanned' : '[35mRestricted'}![0m`);
+            'consumer_banned' === flagtype && CookieCleaner();
+            Config.Cookiecounter < 0 && console.log(`[progress]: [32m${percentage.toFixed(2)}%[0m\n[length]: [33m${Config.CookieArray.length}[0m\n`);
+            return CookieChanger.emit('ChangeCookie');
+        }
     }
-    const convRes = await fetch(`${AI.end()}/api/organizations/${uuidOrg}/chat_conversations`, {
+    if (Config.Cookiecounter < 0 || Exceededlimit) {
+        console.log(Config.Cookiecounter < 0 ? `[progress]: [32m${percentage.toFixed(2)}%[0m\n[length]: [33m${Config.CookieArray.length}[0m\n` : '[35mExceeded limit![0m\n');
+        return CookieChanger.emit('ChangeCookie');
+    } else changing = false;
+/***************************** */
+    const convRes = await fetch(`${Config.rProxy || AI.end()}/api/organizations/${uuidOrg}/chat_conversations`, {
         method: 'GET',
         headers: {
             ...AI.hdr(),
             Cookie: getCookies()
         }
-    });
-    const conversations = await convRes.json();
+    }), conversations = await convRes.json();
     updateParams(convRes);
-    conversations.length > 0 && await Promise.all(conversations.map((conv => deleteChat(conv.uuid))));
-};
-
-const checkResErr = async res => {
-    if (res.status < 200 || res.status >= 300) {
-        let err = Error('Unexpected response code: ' + res.status);
-        try {
-            let json;
-            let error;
-            if (res.superfetch) {
-                error = {
-                    message: res.body,
-                    ...res
-                };
-                delete error.body;
-            } else {
-                json = await res.json();
-                error = json.error;
-            }
-            if (error) {
-                err.planned = true;
-                error.message && (err.message = error.message);
-                error.type && (err.type = error.type);
-/************************** */
-                if (error.message.includes('read-only mode')) {
-                    Config.CookieArray = Config.CookieArray.filter(item => item !== Config.Cookie);
-                    writeSettings(Config);
-                    CookieChanger.emit('ChangeCookie');
-                }
-                else if (error.message.includes('Exceeded completions limit')) {
-                    CookieChanger.emit('ChangeCookie');
-                }
-/************************** */
-                if (429 === res.status && error.resets_at) {
-                    const hours = ((new Date(1e3 * error.resets_at).getTime() - Date.now()) / 1e3 / 60 / 60).toFixed(2);
-                    err.message += `, expires in ${hours} hours`;
-                }
-            }
-        } catch (err) {}
-        throw Error(err);
+    conversations.length > 0 && await asyncPool(10, conversations, async (conv) => await deleteChat(conv.uuid)); //await Promise.all(conversations.map((conv => deleteChat(conv.uuid))));
+/***************************** */
+    invalidtime = 0;
+    } catch (err) {
+        console.error('[33mClewd:[0m\n%o', err);
+        Config.CookieArray?.length > 0 && CookieChanger.emit('ChangeCookie');
     }
-};
-
-class ClewdStream extends TransformStream {
-    constructor(minSize = 8, modelName = AI.mdl(), streaming, abortController) {
-        super({
-            transform: (chunk, controller) => {
-                this.#handle(chunk, controller);
-            },
-            flush: controller => {
-                this.#done(controller);
-            }
-        });
-        this.#modelName = modelName;
-        this.#streaming = streaming;
-        this.#minSize = minSize;
-        this.#abortController = abortController;
-    }
-    #streaming=void 0;
-    #minSize=void 0;
-    #compOK='';
-    #compRaw='';
-    #abortController=void 0;
-    #modelName=void 0;
-    #compAll=[];
-    #recvLength=0;
-    #stopLoc=void 0;
-    #stopReason=void 0;
-    #hardCensor=false;
-    #impersonated=false;
-    get size() {
-        return this.#recvLength;
-    }
-    get total() {
-        return this.#compAll.length;
-    }
-    get censored() {
-        return this.#hardCensor;
-    }
-    get impersonated() {
-        return this.#impersonated;
-    }
-    empty() {
-        this.#compOK = this.#compRaw = '';
-        this.#compAll = [];
-        this.#recvLength = 0;
-    }
-    #collectBuf() {
-        const valid = [ ...this.#compOK ];
-        const selection = valid.splice(0, Math.min(this.#minSize, valid.length)).join('');
-        this.#compOK = valid.join('');
-        return selection;
-    }
-    #build(selection) {
-        Logger?.write(selection);
-        const completion = this.#streaming ? {
-            choices: [ {
-                delta: {
-                    content: genericFixes(selection)
-                }
-            } ]
-        } : {
-            choices: [ {
-                message: {
-                    content: genericFixes(selection)
-                }
-            } ]
-        };
-        return this.#streaming ? (completion => Encoder.encode(`data: ${JSON.stringify(completion)}\n\n`))(completion) : JSON.stringify(completion);
-    }
-    #print() {}
-    #done(controller) {
-        this.#print();
-        330 === this.#recvLength && (this.#hardCensor = true);
-        if (this.#streaming) {
-            this.#compOK.length > 0 && controller.enqueue(this.#build(this.#compOK));
-            controller.enqueue('data: [DONE]\n\n');
-        } else {
-            controller.enqueue(this.#build(this.#compAll.join('')));
-        }
-    }
-    #impersonationCheck(reply, controller) {
-        const fakeAny = ((text, last = false) => {
-            let location = -1;
-            const fakeHuman = ((text, last = false) => {
-                let location = -1;
-                const matchesH = text.match(/(?:(?:\\n)|\n){2}((?:Human|H): ?)/gm);
-                matchesH?.length > 0 && (location = last ? text.lastIndexOf(matchesH[matchesH.length - 1]) : text.indexOf(matchesH[0]));
-                return location;
-            })(text, last);
-            const fakeAssistant = ((text, last = false) => {
-                let location = -1;
-                const matchesA = text.match(/(?:(?:\\n)|\n){2}((?:Assistant|A): ?)/gm);
-                matchesA?.length > 0 && (location = last ? text.lastIndexOf(matchesA[matchesA.length - 1]) : text.indexOf(matchesA[0]));
-                return location;
-            })(text, last);
-            const fakes = [ fakeHuman, fakeAssistant ].filter((idx => idx > -1)).sort();
-            location = last ? fakes.reverse()[0] : fakes[0];
-            return isNaN(location) ? -1 : location;
-        })(reply);
-        if (fakeAny > -1) {
-            this.#impersonated = true;
-            if (Config.Settings.PreventImperson) {
-                const selection = reply.substring(0, fakeAny);
-                console.warn(`[33mimpersonation, dropped:[0m "[4m${reply.substring(fakeAny, reply.length).replace(/\n/g, '\\n')}[0m..."`);
-                controller.enqueue(this.#build(selection));
-                this.#streaming && controller.enqueue('data: [DONE]\n\n');
-                this.#print();
-                this.#abortController.abort();
-                return controller.terminate();
-            }
-        }
-    }
-    #parseMatch(match, controller) {
-        let parsed;
-        let delayChunk;
-        try {
-            parsed = JSON.parse(match);
-            if (parsed.error) {
-                parsed.completion = `## ${Main}\n**${AI.end()} error**:\n\n\`\`\`${JSON.stringify(parsed.error, null, 4)}\`\`\``;
-                console.warn('[31mwebsite err[0m');
-            }
-            if (parsed.completion) {
-                parsed.completion = genericFixes(parsed.completion);
-                this.#compOK += parsed.completion;
-                this.#compRaw = '';
-                this.#compAll.push(parsed.completion);
-                delayChunk = DangerChars.some((char => this.#compOK.endsWith(char) || parsed.completion.startsWith(char)));
-            }
-            !this.#stopLoc && parsed.stop && (this.#stopLoc = parsed.stop.replace(/\n/g, '\\n'));
-            !this.#stopReason && parsed.stop_reason && (this.#stopReason = parsed.stop_reason);
-            if (this.#streaming) {
-                delayChunk && this.#impersonationCheck(this.#compOK, controller);
-                for (;!delayChunk && this.#compOK.length >= this.#minSize; ) {
-                    const selection = this.#collectBuf();
-                    controller.enqueue(this.#build(selection));
-                }
-            } else {
-                delayChunk && this.#impersonationCheck(this.#compAll.join(''), controller);
-            }
-        } catch (err) {}
-    }
-    #handle(chunk, controller) {
-        'string' == typeof chunk && (chunk = Encoder.encode(chunk));
-        this.#recvLength += chunk.byteLength || 0;
-        chunk = Decoder.decode(chunk).replace(/^data: {/gim, '{').replace(/\s+$/gim, '');
-        this.#compRaw += chunk;
-        const matches = this.#compRaw.split(/(\n){1}/gm).filter((match => match.length > 0 && '\n' !== match));
-        for (const match of matches) {
-            this.#parseMatch(match, controller);
-        }
-    }
-}
-
-const writeSettings = async (config, firstRun = false) => {
-    FS.writeFileSync(ConfigPath, `/*\n* https://rentry.org/teralomaniac_clewd\n* https://github.com/teralomaniac/clewd\n*/\n\n// SET YOUR COOKIE BELOW\n\nmodule.exports = ${JSON.stringify(config, null, 4)}\n\n/*\n BufferSize\n * How many characters will be buffered before the AI types once\n * lower = less chance of \`PreventImperson\` working properly\n\n ---\n\n SystemInterval\n * How many messages until \`SystemExperiments alternates\`\n\n ---\n\n Other settings\n * https://gitgud.io/ahsk/clewd/#defaults\n * and\n * https://gitgud.io/ahsk/clewd/-/blob/master/CHANGELOG.md\n */`.trim().replace(/((?<!\r)\n|\r(?!\n))/g, '\r\n'));
+/***************************** */
+}, writeSettings = async (config, firstRun = false) => {
+    if (process.env.Cookie || process.env.CookieArray) return; //
+    write(ConfigPath, `/*\n* https://rentry.org/teralomaniac_clewd\n* https://github.com/teralomaniac/clewd\n*/\n\n// SET YOUR COOKIE BELOW\n\nmodule.exports = ${JSON.stringify(config, null, 4)}\n\n/*\n BufferSize\n * How many characters will be buffered before the AI types once\n * lower = less chance of \`PreventImperson\` working properly\n\n ---\n\n SystemInterval\n * How many messages until \`SystemExperiments alternates\`\n\n ---\n\n Other settings\n * https://gitgud.io/ahsk/clewd/#defaults\n * and\n * https://gitgud.io/ahsk/clewd/-/blob/master/CHANGELOG.md\n */`.trim().replace(/((?<!\r)\n|\r(?!\n))/g, '\r\n'));
     if (firstRun) {
         console.warn('[33mconfig file created!\nedit[0m [1mconfig.js[0m [33mto set your settings and restart the program[0m');
         process.exit(0);
     }
-};
-
-const Proxy = Server((async (req, res) => {
+}, Proxy = Server((async (req, res) => {
     if ('OPTIONS' === req.method) {
         return ((req, res) => {
             res.writeHead(200, {
@@ -649,9 +401,19 @@ const Proxy = Server((async (req, res) => {
     switch (req.url) {
       case '/v1/models':
         res.json({
-            data: [ {
-                id: AI.mdl()
-            } ]
+/***************************** */
+            data: [ //data: AI.mdl().map((name => ({
+                ...AI.mdl().slice(1).map((name => ({ id: name }))), {
+                    id: 'claude-2'                  },{
+                    id: 'claude-v1.3'               },{
+                    id: 'claude-v1.3-100k'          },{
+                    id: 'claude-v1.2'               },{
+                    id: 'claude-v1.0'               },{
+                    id: 'claude-instant-v1.1'       },{
+                    id: 'claude-instant-v1.1-100k'  },{
+                    id: 'claude-instant-v1.0'       //id: name
+            }] //})))
+/***************************** */
         });
         break;
 
@@ -659,25 +421,36 @@ const Proxy = Server((async (req, res) => {
         ((req, res) => {
             setTitle('recv...');
             let fetchAPI;
-            const controller = new AbortController;
-            const {signal} = controller;
+            const abortControl = new AbortController, {signal} = abortControl;
             res.socket.on('close', (async () => {
-                controller.signal.aborted || controller.abort();
+                abortControl.signal.aborted || abortControl.abort();
             }));
             const buffer = [];
             req.on('data', (chunk => {
                 buffer.push(chunk);
             }));
             req.on('end', (async () => {
-                let clewdStream;
-                let titleTimer;
-                let samePrompt = false;
-                let shouldRenew = true;
-                let retryRegen = false;
+                let clewdStream, titleTimer, samePrompt = false, shouldRenew = true, retryRegen = false;
                 try {
                     const body = JSON.parse(Buffer.concat(buffer).toString());
-                    const temperature = Math.max(.1, Math.min(1, body.temperature));
+                    let {temperature} = body;
+                    temperature = Math.max(.1, Math.min(1, temperature));
                     let {messages} = body;
+/************************* */
+                    apiKey = req.headers.authorization?.match(/sk-ant-api\d\d-[\w-]{86}-[\w-]{6}AA/g) || req.headers.authorization?.match(/(?<=3rdKey: *)[\S]*/);
+                    reqModel = /^claude-2.[01]$/.test(body.model) ? body.model : '';
+                    let max_tokens_to_sample, stop_sequences;
+                    if (apiKey || Config.Settings.PassParams) {
+                        stop_sequences = body.stop;
+                        max_tokens_to_sample = body.max_tokens;
+                        model = body.model;
+                    } else if (req.headers.authorization?.includes('sk-ant-api') || Config.ProxyPassword != '' && req.headers.authorization != 'Bearer ' + Config.ProxyPassword) {
+                        throw Error(req.headers.authorization?.includes('sk-ant-api') ? 'apiKey Wrong' : 'ProxyPassword Wrong');
+                    } else if (changing || Config.CookieArray?.length > 0 && invalidtime >= Config.CookieArray?.length || reqModel && reqModel != cookieModel && !Config.Settings.PassParams) {
+                        changing ? invalidtime = 0 : changeflag = -1;
+                        throw Error(reqModel && reqModel != cookieModel && !Config.Settings.PassParams ? 'Polling requset model...' : 'Changing Cookie...');
+                    }
+/************************* */
                     if (messages?.length < 1) {
                         throw Error('Select OpenAI as completion source');
                     }
@@ -708,7 +481,13 @@ const Proxy = Server((async (req, res) => {
                         console.log('[33mhaving[0m [1mAllSamples[0m and [1mNoSamples[0m both set to true is not supported');
                         throw Error('Only one can be used at the same time: AllSamples/NoSamples');
                     }
-                    const model = AI.mdl();
+                    //const model = body.model;
+                    //if (model === AI.mdl()[0]) {
+                    //    return;
+                    //}
+                    if (!/claude-.*/.test(model)) {
+                        throw Error('Invalid model selected: ' + model);
+                    }
                     curPrompt = {
                         firstUser: messages.find((message => 'user' === message.role)),
                         firstSystem: messages.find((message => 'system' === message.role)),
@@ -728,16 +507,16 @@ const Proxy = Server((async (req, res) => {
                         }
                     };
                     samePrompt = JSON.stringify(messages.filter((message => 'system' !== message.role)).sort()) === JSON.stringify(prevMessages.filter((message => 'system' !== message.role)).sort());
-                    const sameCharDiffChat = !samePrompt && curPrompt.firstSystem?.content === prevPrompt.firstSystem?.content && curPrompt.firstUser.content !== prevPrompt.firstUser?.content;
+                    const sameCharDiffChat = !samePrompt && curPrompt.firstSystem?.content === prevPrompt.firstSystem?.content && curPrompt.firstUser?.content !== prevPrompt.firstUser?.content;
                     shouldRenew = Config.Settings.RenewAlways || !Conversation.uuid || prevImpersonated || !Config.Settings.RenewAlways && samePrompt || sameCharDiffChat;
                     retryRegen = Config.Settings.RetryRegenerate && samePrompt && null != Conversation.uuid;
                     samePrompt || (prevMessages = JSON.parse(JSON.stringify(messages)));
                     let type = '';
-                    if (retryRegen) {
+                    if (apiKey) { type = 'api'; } else if (retryRegen) { //if (retryRegen) {
                         type = 'R';
-                        fetchAPI = await (async (signal, body, model) => {
+                        fetchAPI = await (async (signal, model) => {
                             let res;
-                            const json = {
+                            const body = {
                                 completion: {
                                     prompt: '',
                                     timezone: AI.zone(),
@@ -747,34 +526,32 @@ const Proxy = Server((async (req, res) => {
                                 conversation_uuid: Conversation.uuid,
                                 text: ''
                             };
-                            res = Config.Settings.Superfetch ? await superfetch({
-                                url: AI.end() + '/api/retry_message',
-                                method: 'POST',
-                                body: json,
-                                headers: {
-                                    Accept: 'text/event-stream',
-                                    Cookie: getCookies(),
-                                    'User-Agent': AI.agent()
-                                }
-                            }) : await fetch(AI.end() + '/api/retry_message', {
+                            let headers = {
+                                ...AI.hdr(Conversation.uuid || ''),
+                                Accept: 'text/event-stream',
+                                Cookie: getCookies()
+                            };
+                            if (Config.Settings.Superfetch) {
+                                const names = Object.keys(headers), values = Object.values(headers);
+                                headers = names.map(((header, idx) => `${header}: ${values[idx]}`));
+                            }
+                            res = await (Config.Settings.Superfetch ? Superfetch : fetch)((Config.rProxy || AI.end()) + '/api/retry_message', {
+                                stream: true,
                                 signal,
-                                headers: {
-                                    ...AI.hdr(),
-                                    Cookie: getCookies()
-                                },
                                 method: 'POST',
-                                body: JSON.stringify(json)
+                                body: JSON.stringify(body),
+                                headers
                             });
                             updateParams(res);
                             await checkResErr(res);
                             return res;
-                        })(signal, 0, model);
+                        })(signal, model);
                     } else if (shouldRenew) {
                         Conversation.uuid && await deleteChat(Conversation.uuid);
                         fetchAPI = await (async signal => {
                             Conversation.uuid = randomUUID().toString();
                             Conversation.depth = 0;
-                            const res = await fetch(`${AI.end()}/api/organizations/${uuidOrg}/chat_conversations`, {
+                            const res = await (Config.Settings.Superfetch ? Superfetch : fetch)(`${Config.rProxy || AI.end()}/api/organizations/${uuidOrg}/chat_conversations`, {
                                 signal,
                                 headers: {
                                     ...AI.hdr(),
@@ -802,20 +579,22 @@ const Proxy = Server((async (req, res) => {
                         }
                     }
                     let {prompt, systems} = ((messages, type) => {
-                        const rgxScenario = /^\[Circumstances and context of the dialogue: ([\s\S]+?)\.?\]$/i;
-                        const rgxPerson = /^\[([\s\S]+?)'s personality: ([\s\S]+?)\]$/i;
-                        const messagesClone = JSON.parse(JSON.stringify(messages));
-                        const realLogs = messagesClone.filter((message => [ 'user', 'assistant' ].includes(message.role)));
-                        const sampleLogs = messagesClone.filter((message => message.name));
-                        const mergedLogs = [ ...sampleLogs, ...realLogs ];
+                        const rgxScenario = /^\[Circumstances and context of the dialogue: ([\s\S]+?)\.?\]$/i, rgxPerson = /^\[([\s\S]+?)'s personality: ([\s\S]+?)\]$/i, messagesClone = JSON.parse(JSON.stringify(messages)), realLogs = messagesClone.filter((message => [ 'user', 'assistant' ].includes(message.role))), sampleLogs = messagesClone.filter((message => message.name)), mergedLogs = [ ...sampleLogs, ...realLogs ];
                         mergedLogs.forEach(((message, idx) => {
-                            const next = realLogs[idx + 1];
-                            message.customname = (message => [ 'assistant', 'user' ].includes(message.role) && message.name && !(message.name in Replacements))(message);
-                            if (next) {
-                                if (message.name && next.name && message.name === next.name) {
-                                    message.content += '\n' + next.content;
-                                    next.merged = true;
-                                } else if (next.role === message.role) {
+                            const next = mergedLogs[idx + 1];
+                            message.customname = (message => [ 'assistant', 'user' ].includes(message.role) && null != message.name && !(message.name in Replacements))(message);
+                            if (next && !Config.Settings.xmlPlot) { //if (next) {
+                                if ('name' in message && 'name' in next) {
+                                    if (message.name === next.name) {
+                                        message.content += '\n' + next.content;
+                                        next.merged = true;
+                                    }
+                                } else if ('system' !== next.role) {
+                                    if (next.role === message.role) {
+                                        message.content += '\n' + next.content;
+                                        next.merged = true;
+                                    }
+                                } else {
                                     message.content += '\n' + next.content;
                                     next.merged = true;
                                 }
@@ -825,30 +604,32 @@ const Proxy = Server((async (req, res) => {
                         lastAssistant && Config.Settings.StripAssistant && (lastAssistant.strip = true);
                         const lastUser = realLogs.findLast((message => !message.merged && 'user' === message.role));
                         lastUser && Config.Settings.StripHuman && (lastUser.strip = true);
-                        const systemMessages = messagesClone.filter((message => 'system' === message.role && !message.name));
+                        const systemMessages = messagesClone.filter((message => 'system' === message.role && !('name' in message)));
                         systemMessages.forEach(((message, idx) => {
-                            const scenario = message.content.match(rgxScenario)?.[1];
-                            const personality = message.content.match(rgxPerson);
+                            const scenario = message.content.match(rgxScenario)?.[1], personality = message.content.match(rgxPerson);
                             if (scenario) {
-                                message.content = Config.ScenarioFormat.replace(/{{SCENARIO}}/g, scenario);
+                                message.content = Config.ScenarioFormat.replace(/{{scenario}}/gim, scenario);
                                 message.scenario = true;
                             }
                             if (3 === personality?.length) {
-                                message.content = Config.PersonalityFormat.replace(/{{CHAR}}/gm, personality[1]).replace(/{{PERSONALITY}}/gm, personality[2]);
+                                message.content = Config.PersonalityFormat.replace(/{{char}}/gim, personality[1]).replace(/{{personality}}/gim, personality[2]);
                                 message.personality = true;
                             }
                             message.main = 0 === idx;
                             message.jailbreak = idx === systemMessages.length - 1;
+                            ' ' === message.content && (message.discard = true);
                         }));
                         Config.Settings.AllSamples && !Config.Settings.NoSamples && realLogs.forEach((message => {
-                            if ('user' === message.role) {
-                                message.name = message.customname ? message.name : 'example_user';
-                                message.role = 'system';
-                            } else if ('assistant' === message.role) {
-                                message.name = message.customname ? message.name : 'example_assistant';
-                                message.role = 'system';
-                            } else if (!message.customname) {
-                                throw Error('Invalid role ' + message.name);
+                            if (![ lastUser, lastAssistant ].includes(message)) {
+                                if ('user' === message.role) {
+                                    message.name = message.customname ? message.name : 'example_user';
+                                    message.role = 'system';
+                                } else if ('assistant' === message.role) {
+                                    message.name = message.customname ? message.name : 'example_assistant';
+                                    message.role = 'system';
+                                } else if (!message.customname) {
+                                    throw Error('Invalid role ' + message.name);
+                                }
                             }
                         }));
                         Config.Settings.NoSamples && !Config.Settings.AllSamples && sampleLogs.forEach((message => {
@@ -862,7 +643,7 @@ const Proxy = Server((async (req, res) => {
                             message.customname || delete message.name;
                         }));
                         let systems = [];
-                        if (![ 'r', 'R' ].includes(type)) {
+                        if (![ 'r', 'R', 'api' ].includes(type)) {
                             lastUser.strip = true;
                             systemMessages.forEach((message => message.discard = message.discard || 'c-c' === type ? !message.jailbreak : !message.jailbreak && !message.main));
                             systems = systemMessages.filter((message => !message.discard)).map((message => `"${message.content.substring(0, 25).replace(/\n/g, '\\n').trim()}..."`));
@@ -876,115 +657,152 @@ const Proxy = Server((async (req, res) => {
                                 return message.content;
                             }
                             let spacing = '';
-                            idx > 0 && (spacing = systemMessages.includes(message) ? '\n' : '\n\n');
-                            const prefix = message.customname ? message.name + ': ' : 'system' !== message.role || message.name ? Replacements[message.name || message.role] + ': ' : '' + Replacements[message.role];
-                            return `${spacing}${message.strip ? '' : prefix}${message.content.trim()}`;
+/******************************** */
+                            if (Config.Settings.xmlPlot) {
+                                idx > 0 && (spacing = '\n\n');
+                                const prefix = message.customname ? message.role + ': ' + message.name + ': ' : 'system' !== message.role || message.name ? Replacements[message.name || message.role] + ': ' : 'xmlPlot: ' + Replacements[message.role];
+                                return `${spacing}${message.strip ? '' : prefix}${message.content}`;
+                            } else {
+/******************************** */
+                                idx > 0 && (spacing = systemMessages.includes(message) ? '\n' : '\n\n');
+                                const prefix = message.customname ? message.name + ': ' : 'system' !== message.role || message.name ? Replacements[message.name || message.role] + ': ' : '' + Replacements[message.role];
+                                return `${spacing}${message.strip ? '' : prefix}${'system' === message.role ? message.content : message.content.trim()}`;
+                            } //
                         }));
                         return {
-                            prompt: genericFixes(prompt.join('')).trim(),
+                            prompt: prompt.join(''), //genericFixes(prompt.join('')).trim(),
                             systems
                         };
                     })(messages, type);
-                    console.log(`${model} [[2m${type}[0m]${!retryRegen && systems.length > 0 ? ' ' + systems.join(' [33m/[0m ') : ''}`);
+                    console.log(`${model} [[2m${type}[0m]${!retryRegen && systems.length > 0 ? ' ' + systems.join(' [33m/[0m ') : ''}`); //console.log(`${model} [[2m${type}[0m]${!retryRegen && systems.length > 0 ? ' ' + systems.join(' [33m/[0m ') : ''}`);
                     'R' !== type || prompt || (prompt = '...regen...');
-/****************************************************************/
-                    if (Config.Settings.xmlPlot) {prompt = AddxmlPlot(prompt)};
-                    if (Config.Settings.FullColon) {prompt = prompt.replace(/(?<=\n\n(H(?:uman)?|A(?:ssistant)?)):[ ]?/g, '：')};
-                    if (Config.Settings.padtxt) {prompt = padJson(prompt)};
-/****************************************************************/
-                    Logger?.write(`\n\n-------\n[${(new Date).toLocaleString()}]\n####### PROMPT (${type}):\n${prompt}\n--\n####### REPLY:\n`);                
-                    retryRegen || (fetchAPI = await (async (signal, body, model, prompt, temperature) => {
+/******************************** */
+                    prompt = Config.Settings.xmlPlot ? xmlPlot(prompt, model != 'claude-2.1') : apiKey ? `\n\nHuman: ${genericFixes(prompt)}\n\nAssistant: ` : genericFixes(prompt).trim();
+                    Config.Settings.FullColon && (prompt = apiKey
+                        ? prompt.replace(/(?<!\n\nHuman:.*)(\n\nAssistant):/gs, '$1：').replace(/(\n\nHuman):(?!.*\n\nAssistant:)/gs, '$1：')
+                        : prompt.replace(/(?<=\n\n(H(?:uman)?|A(?:ssistant)?)):[ ]?/g, '： '));
+                    Config.Settings.padtxt && (prompt = padtxt(prompt));
+/******************************** */
+                    Logger?.write(`\n\n-------\n[${(new Date).toLocaleString()}]\n####### ${model} (${type}) ${tokens}t PROMPT:\n${prompt}\n--\n####### REPLY:\n`); //Logger?.write(`\n\n-------\n[${(new Date).toLocaleString()}]\n####### MODEL: ${model}\n####### PROMPT (${type}):\n${prompt}\n--\n####### REPLY:\n`);
+                    retryRegen || (fetchAPI = await (async (signal, model, prompt, temperature, type) => {
+/******************************** */
+                        if (apiKey) {
+                            const res = await fetch(`${Config.api_rProxy ? Config.api_rProxy : 'https://api.anthropic.com'}/v1/complete`, {
+                                method: 'POST',
+                                signal,
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                    'x-api-key': apiKey[Math.floor(Math.random() * apiKey.length)],
+                                    'anthropic-version': '2023-06-01'
+                                },
+                                body: JSON.stringify({
+                                    ...stop_sequences && {stop_sequences},
+                                    model,
+                                    max_tokens_to_sample,
+                                    stream: true,
+                                    prompt,
+                                    temperature
+                                }),
+                            });
+                            await checkResErr(res);
+                            return res;
+                        }
+/******************************** */
                         const attachments = [];
                         if (Config.Settings.PromptExperiments) {
+                            let splitedprompt = prompt.split('\n\nPlainPrompt:'); //
+                            prompt = splitedprompt[0]; //
                             attachments.push({
                                 extracted_content: (prompt),
                                 file_name: 'paste.txt',  //fileName(),
                                 file_size: Buffer.from(prompt).byteLength,
                                 file_type: 'txt'  //'text/plain'
                             });
-                            prompt = '';
+                            prompt = 'r' === type ? Config.PromptExperimentFirst : Config.PromptExperimentNext;
+                            splitedprompt.length > 1 && (prompt += splitedprompt[1]); //
                         }
                         let res;
-                        const json = {
+                        const body = {
                             completion: {
                                 ...Config.Settings.PassParams && {
                                     temperature
                                 },
-                                prompt,
+                                prompt: prompt || '',
                                 timezone: AI.zone(),
                                 model
                             },
-                            organization_uuid: uuidOrg,
                             conversation_uuid: Conversation.uuid,
-                            text: prompt,
+                            organization_uuid: uuidOrg,
+                            text: prompt || '',
                             attachments
                         };
-                        res = Config.Settings.Superfetch ? await superfetch({
-                            url: AI.end() + '/api/append_message',
-                            method: 'POST',
-                            body: json,
-                            headers: {
-                                Accept: 'text/event-stream',
-                                Cookie: getCookies(),
-                                'User-Agent': AI.agent()
-                            }
-                        }) : await fetch(AI.end() + '/api/append_message', {
+                        let headers = {
+                            ...AI.hdr(Conversation.uuid || ''),
+                            Accept: 'text/event-stream',
+                            Cookie: getCookies()
+                        };
+                        res = await (Config.Settings.Superfetch ? Superfetch : fetch)((Config.rProxy || AI.end()) + '/api/append_message', {
+                            stream: true,
                             signal,
                             method: 'POST',
-                            body: JSON.stringify(json),
-                            headers: {
-                                ...AI.hdr(),
-                                Accept: 'text/event-stream',
-                                Cookie: getCookies(),
-                                'User-Agent': AI.agent()
-                            }
+                            body: JSON.stringify(body),
+                            headers
                         });
                         updateParams(res);
-                        await checkResErr(res);
+                        await checkResErr(res, CookieChanger); //await checkResErr(res);
                         return res;
-                    })(signal, 0, model, prompt, temperature));
+                    })(signal, model, prompt, temperature, type));
                     const response = Writable.toWeb(res);
-                    clewdStream = new ClewdStream(Config.BufferSize, model, body.stream, controller);
-                    if (Config.Settings.Superfetch) {
-                        const superStream = new ReadableStream({
-                            start(controller) {
-                                fetchAPI.body.split('\n').filter((message => '\n' !== message)).forEach((message => controller.enqueue(message)));
-                                controller.close();
+                    clewdStream = new ClewdStream({
+                        config: {
+                            ...Config,
+                            Settings: {
+                                ...Config.Settings,
+                                Superfetch: apiKey ? false : Config.Settings.Superfetch
                             }
-                        });
-                        await superStream.pipeThrough(clewdStream).pipeTo(response);
-                        setTitle('ok ' + bytesToSize(clewdStream.size));
-                    } else {
-                        titleTimer = setInterval((() => setTitle('recv ' + bytesToSize(clewdStream.size))), 300);
-                        await fetchAPI.body.pipeThrough(clewdStream).pipeTo(response);
-                    }
+                        }, //config: Config,
+                        version: Main,
+                        minSize: Config.BufferSize,
+                        model,
+                        streaming: true === body.stream,
+                        abortControl,
+                        source: fetchAPI
+                    }, Logger);
+                    titleTimer = setInterval((() => setTitle('recv ' + bytesToSize(clewdStream.size))), 300);
+                    (!apiKey && Config.Settings.Superfetch) ? await Readable.toWeb(fetchAPI.body).pipeThrough(clewdStream).pipeTo(response) : await fetchAPI.body.pipeThrough(clewdStream).pipeTo(response); //Config.Settings.Superfetch ? await Readable.toWeb(fetchAPI.body).pipeThrough(clewdStream).pipeTo(response) : await fetchAPI.body.pipeThrough(clewdStream).pipeTo(response);
                 } catch (err) {
                     if ('AbortError' === err.name) {
-                        return res.end();
+                        res.end();
+                    } else {
+                        changeflag -= 1; //
+                        err.planned || console.error('[33mClewd:[0m\n%o', err);
+                        res.json({
+                            error: {
+                                message: 'clewd: ' + (err.message || err.name || err.type),
+                                type: err.type || err.name || err.code,
+                                param: null,
+                                code: err.code || 500
+                            }
+                        }, 500);
                     }
-                    err.planned || console.error('[33mClewd:[0m\n%o', err);
-                    res.json({
-                        error: {
-                            message: 'clewd: ' + (err.message || err.name || err.type),
-                            type: err.type || err.name || err.code,
-                            param: null,
-                            code: err.code || 500
-                        }
-                    });
-                } finally {
-                    Config.Settings.Superfetch || clearInterval(titleTimer);
-                    if (clewdStream) {
-                        clewdStream.censored && console.warn('[33mlikely your account is hard-censored[0m');
-                        prevImpersonated = clewdStream.impersonated;
-                        console.log(`${200 == fetchAPI.status ? '[32m' : '[33m'}${fetchAPI.status}![0m\n`);
-                        setTitle('ok ' + bytesToSize(clewdStream.size));
-                        clewdStream.empty();
+                }
+                clearInterval(titleTimer);
+                if (clewdStream) {
+                    clewdStream.censored && console.warn('[33mlikely your account is hard-censored[0m');
+                    clewdStream.nochange && changeflag--; //prevImpersonated = clewdStream.impersonated;
+                    setTitle('ok ' + bytesToSize(clewdStream.size));
+                    429 == fetchAPI?.status ? console.log(`[35mExceeded limit![0m\n`) : console.log(`${200 == fetchAPI?.status ? '[32m' : '[33m'}${fetchAPI?.status}![0m\n`); //console.log(`${200 == fetchAPI.status ? '[32m' : '[33m'}${fetchAPI.status}![0m\n`);
+                    clewdStream.empty();
+                }
+                if (!apiKey) { //if (prevImpersonated) { try {
+                    await deleteChat(Conversation.uuid); //} catch (err) {}
+/******************************** */
+                    changeflag++;
+                    if (changeflag < 0 || Config.CookieArray?.length > 0 && (429 == fetchAPI?.status || Config.Cookiecounter > 0 && changeflag >= Config.Cookiecounter)) {
+                        changeflag = 0;
+                        CookieChanger.emit('ChangeCookie');
                     }
-                    if (prevImpersonated) {
-                        try {
-                            await deleteChat(Conversation.uuid);
-                        } catch (err) {}
-                    }
+/******************************** */
                 }
             }));
         })(req, res);
@@ -993,33 +811,33 @@ const Proxy = Server((async (req, res) => {
       case '/v1/complete':
         res.json({
             error: {
-                message: 'clewd: Set "Chat Completion source" to OpenAI instead of Claude. Enable "External" models aswell'
+                message: 'clewd: Set "Chat Completion source" to OpenAI instead of Claude. Enable "External" models aswell',
+                code: 404
             }
-        });
+        }, 404);
         break;
 
       default:
-        console.log('unknown request: ' + req.url);
-        res.json({
+        !['/', '/v1', '/favicon.ico'].includes(req.url) && (console.log('unknown request: ' + req.url)); //console.log('unknown request: ' + req.url);
+        res.writeHead(200, {'Content-Type': 'text/html'});
+        res.write(`<!DOCTYPE html>\n<html>\n<head>\n<meta charset="utf-8">\n<script>\nfunction copyToClipboard(text) {\n  var textarea = document.createElement("textarea");\n  textarea.textContent = text;\n  textarea.style.position = "fixed";\n  document.body.appendChild(textarea);\n  textarea.select();\n  try {\n    return document.execCommand("copy");\n  } catch (ex) {\n    console.warn("Copy to clipboard failed.", ex);\n    return false;\n  } finally {\n    document.body.removeChild(textarea);\n  }\n}\nfunction copyLink(event) {\n  event.preventDefault();\n  const url = new URL(window.location.href);\n  const link = url.protocol + '//' + url.host + '/v1';\n  copyToClipboard(link);\n  alert('链接已复制: ' + link);\n}\n</script>\n</head>\n<body>\n${Main}<br/><br/>完全开源、免费且禁止商用<br/><br/>点击复制反向代理: <a href="v1" onclick="copyLink(event)">Copy Link</a><br/>填入OpenAI API反向代理并选择OpenAI分类中的claude模型（酒馆需打开Show "External" models，仅在api模式有模型选择差异）<br/><br/>教程与FAQ: <a href="https://rentry.org/teralomaniac_clewd" target="FAQ">Rentry</a> | <a href="https://discord.com/invite/B7Wr25Z7BZ" target="FAQ">Discord</a><br/><br/><br/>请举报恶意盗用/商用本教程及Clewd修改版的这个B 站up<a href="https://space.bilibili.com/35307060" target="FAQ">浅睡一天一夜</a>\n</body>\n</html>`);
+        res.end();
+        /*res.json(
+            {
             error: {
                 message: '404 Not Found',
                 type: 404,
                 param: null,
                 code: 404
             }
-        }, 200);
+        }, 404);*/
     }
 }));
 
 !async function() {
     await (async () => {
-        if (FS.existsSync(ConfigPath)) {
-            const userConfig = require(ConfigPath);
-            const validConfigs = Object.keys(Config);
-            const parsedConfigs = Object.keys(userConfig);
-            const parsedSettings = Object.keys(userConfig.Settings);
-            const invalidConfigs = parsedConfigs.filter((config => !validConfigs.includes(config)));
-            const validSettings = Object.keys(Config.Settings);
+        if (exists(ConfigPath)) {
+            const userConfig = require(ConfigPath), validConfigs = Object.keys(Config), parsedConfigs = Object.keys(userConfig), parsedSettings = Object.keys(userConfig.Settings), invalidConfigs = parsedConfigs.filter((config => !validConfigs.includes(config))), validSettings = Object.keys(Config.Settings);
             UnknownSettings = parsedSettings.filter((setting => !validSettings.includes(setting)));
             invalidConfigs.forEach((config => {
                 console.warn(`unknown config in config.js: [33m${config}[0m`);
@@ -1027,8 +845,7 @@ const Proxy = Server((async (req, res) => {
             UnknownSettings.forEach((setting => {
                 console.warn(`unknown setting in config.js: [33mSettings.${setting}[0m`);
             }));
-            const missingConfigs = validConfigs.filter((config => !parsedConfigs.includes(config)));
-            const missingSettings = validSettings.filter((config => !parsedSettings.includes(config)));
+            const missingConfigs = validConfigs.filter((config => !parsedConfigs.includes(config))), missingSettings = validSettings.filter((config => !parsedSettings.includes(config)));
             missingConfigs.forEach((config => {
                 console.warn(`adding missing config in config.js: [33m${config}[0m`);
                 userConfig[config] = Config[config];
@@ -1039,7 +856,7 @@ const Proxy = Server((async (req, res) => {
             }));
             ChangedSettings = parsedSettings.filter((setting => Config.Settings[setting] !== userConfig.Settings[setting]));
             (missingConfigs.length > 0 || missingSettings.length > 0) && await writeSettings(userConfig);
-            userConfig.Settings.LogMessages && (Logger = require('fs').createWriteStream(LogPath));
+            userConfig.Settings.LogMessages && (Logger = createWriteStream(LogPath));
             Config = {
                 ...Config,
                 ...userConfig
@@ -1048,37 +865,42 @@ const Proxy = Server((async (req, res) => {
             Config.Cookie = 'SET YOUR COOKIE HERE';
             writeSettings(Config, true);
         }
-/***************************** */
-        for (let key in Config) {
-            if (key === 'Settings') {
-                for (let setting in Config.Settings) {
-                    Config.Settings[setting] = process.env[setting] ?? Config.Settings[setting];
-                }
-            } else {
-                Config[key] = key === 'CookieArray' ? (process.env[key]?.split(',') ?? Config[key]) : (process.env[key] ?? Config[key]);
-            }
-        }
-/***************************** */
     })();
-    currentIndex = Math.floor(Math.random() * Config.CookieArray.length);
+/***************************** */
+    for (let key in Config) {
+        if (key === 'Settings') {
+            for (let setting in Config.Settings) {
+                Config.Settings[setting] = process.env[setting] ? convertToType(process.env[setting]) : Config.Settings[setting];
+            }
+        } else {
+            Config[key] = process.env[key] ? convertToType(process.env[key]) : Config[key];
+        }
+    }
+    Config.rProxy = Config.rProxy.replace(/\/$/, '');
+    Config.CookieArray = [...new Set([Config.CookieArray].join('').match(/(sessionKey=)?sk-ant-sid01-[\w-]{86}-[\w-]{6}AA/g))];
+    writeSettings(Config);
+    currentIndex = Config.CookieIndex > 0 ? Config.CookieIndex - 1 : Config.Cookiecounter >= 0 ? Math.floor(Math.random() * Config.CookieArray.length) : 0;
+/***************************** */
     Proxy.listen(Config.Port, Config.Ip, onListen);
     Proxy.on('error', (err => {
         console.error('Proxy error\n%o', err);
     }));
 }();
 
-process.on('SIGINT', (async () => {
+const cleanup = async () => {
     console.log('cleaning...');
     try {
         await deleteChat(Conversation.uuid);
         Logger?.close();
-        Superfetch?.exit((() => {
-            process.exit();
-        }));
-    } catch (err) {
-        process.exit();
-    }
-}));
+    } catch (err) {}
+    process.exit();
+};
+
+process.on('SIGHUP', cleanup);
+
+process.on('SIGTERM', cleanup);
+
+process.on('SIGINT', cleanup);
 
 process.on('exit', (async () => {
     console.log('exiting...');

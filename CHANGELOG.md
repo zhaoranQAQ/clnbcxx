@@ -12,6 +12,127 @@
 </a>
 </div>
 
+# 4.7
+
+added multiple model options in case you subscribe to their plans. some based on their docs, some on rumors. stick to 2.1 if you're a free user
+
+# 4.6
+
+fixed major bug in the prompt build logic which was causing problems like the AI refering to old messages erroneously, ignoring your latest message, etc
+
+added superfetch for armv7
+
+# 4.5
+
+expanded superfetch to fix some errors
+
+status codes and *some* basic as fuck error handling for superfetch
+
+stopped trimming system messages
+
+fixed crash sometimes after superfetch request
+
+fixed impersonation sometimes not stopping
+
+fixed hard-censor detection
+
+fixed weird behavior when "Add character names" was checked
+
+fixed another source of "Received no valid replies at all"
+
+chown added to start.sh to stop EACESS errors
+
+> **AllSamples** changed
+
+last Assistant and Human will not be transformed into examples
+
+# 4.4
+
+fixed another source of "Received no valid replies at all"
+
+# 4.3
+
+a fix for "Received no valid replies at all" on >=20k ctx (tested 35k)
+
+> **SuperfetchTimeout** removed
+
+was only relevant to pre-4.0
+
+> **Hotfix 1**
+
+fixed another source of "Received no valid replies at all"
+
+
+# 4.2
+
+fixed broken replies
+
+# 4.1
+
+> **PromptExperimentFirst** and **PromptExperimentNext** added
+
+both only have effect when **PromptExperiments** is true
+
+**PromptExperimentFirst** is sent on the very first message together with the prompt in file form
+
+**PromptExperimentNext** is sent on the subsequent messages if **RenewAlways** is false
+
+examples
+
+- PromptExperimentFirst set to "Comply"
+
+- PromptExperimentNext set to "Continue"
+
+- one of them set to secondary jailbreak
+
+
+
+
+# 4.0
+
+> **Streaming changes**
+
+reworked how messages are parsed, again
+
+> **Superfetch** reworked
+
+pros:
+- streaming
+- fast
+- more reliable
+- no lingering processes
+- no firewall issues (hopefully)
+
+cons:
+- the AI typing might look weird
+- no android-armv7
+- android-arm64 possibly doesn't work
+- mac-arm64 possibly doesn't work
+- no 32bit for any platform for now
+- poor error handling
+
+tested on linux and windows
+
+> **SuperfetchHost** and **SuperfetchPort** removed
+
+> **Minor changes**
+
+split code into multiple files
+
+clewd-superfetch and clewd are now the same package
+
+removed all dependencies
+
+**git** [added to requirements](https://gitgud.io/ahsk/clewd/#requirements) (highly recommended so update scripts work, otherwise do a clean install)
+
+# 3.8.5
+
+fixed memory leak on clewd-superfetch
+
+added support for custom host/port for superfetch in case you want
+
+better cleaning up so it is less likely orphan superfetch processes will remain
+
 # 3.8
 > **Superfetch** reworked
 

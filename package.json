@@ -1,14 +1,13 @@
 {
   "name": "clewd",
-  "version": "3.8",
-  "description": ":^)",
+  "version": "4.7",
+  "description": "<div align=\"center\"> <a href=\"https://github.com/teralomaniac/clewd\"> <h1>Clewd</h1>   <img     height=\"120\"     width=\"120\"     alt=\"Clewd\"     title=\"Clewd\"     src=\"https://gitgud.io/ahsk/clewd/-/raw/master/media/logo.png\"     align=\"left\"   />",
   "main": "clewd.js",
   "engines": {
     "node": ">=20.4.0"
   },
   "scripts": {
-    "run": "node clewd.js",
-    "postinstall": "npm update && npm i clewd-superfetch"
+    "run": "node clewd.js"
   },
   "keywords": [
     "doom",
@@ -37,7 +36,7 @@
     "url": "https://gitgud.io/ahsk/clewd/-/issues"
   },
   "dependencies": {
-    "clewd-superfetch": "github:h-a-s-k/clewd-superfetch",
-    "localtunnel": "^2.0.2"
+    "localtunnel": "^2.0.2",
+    "@anthropic-ai/tokenizer": "^0.0.4"
   }
 }
